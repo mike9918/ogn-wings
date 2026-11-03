@@ -49,6 +49,8 @@ impl Manager {
 pub mod startup_queue;
 #[path = "../../../application/src/server/startup_queue_core.rs"]
 pub mod startup_queue_core;
+#[path = "../../../application/src/server/startup_marker.rs"]
+pub mod startup_marker;
 
 #[cfg(test)]
 mod tests {
