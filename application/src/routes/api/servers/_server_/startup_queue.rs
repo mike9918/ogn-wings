@@ -9,9 +9,11 @@ async fn get(server: GetServer) -> ApiResponseResult {
     crate::server::startup_queue::refresh(&server).await;
     ApiResponse::new_serialized(serde_json::json!({"available":true,"queue":crate::server::startup_queue::snapshot(server.uuid)})).ok()
 }
+#[derive(serde::Deserialize)]
+struct CancelParams { queued_at: Option<u64> }
 #[utoipa::path(delete,path="/",responses((status=OK,body=serde_json::Value)))]
-async fn cancel(server: GetServer) -> ApiResponseResult {
-    if !crate::server::startup_queue::cancel(server.uuid) {
+async fn cancel(server: GetServer, axum::extract::Query(params): axum::extract::Query<CancelParams>) -> ApiResponseResult {
+    if !crate::server::startup_queue::cancel_ticket(server.uuid, params.queued_at) {
         return ApiResponse::error("This start has already left the queue")
             .with_status(axum::http::StatusCode::CONFLICT)
             .ok();

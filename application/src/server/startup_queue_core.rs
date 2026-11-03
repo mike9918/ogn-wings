@@ -30,6 +30,7 @@ impl Phase {
 }
 #[derive(Clone, Debug)]
 pub struct Ticket {
+    pub priority: u8,
     pub generation: u64,
     pub queued_at: u64,
     pub started_at: Option<u64>,
@@ -75,6 +76,14 @@ impl Queue {
                 .count()
     }
     pub fn reserve(&mut self, id: u128, now: u64) -> Result<u64, &'static str> {
+        self.reserve_priority(id, now, 0)
+    }
+    pub fn reserve_priority(
+        &mut self,
+        id: u128,
+        now: u64,
+        priority: u8,
+    ) -> Result<u64, &'static str> {
         if self.entries.get(&id).is_some_and(|e| e.phase.live()) {
             return Err("Server already has a pending start");
         }
@@ -85,6 +94,7 @@ impl Queue {
         self.entries.insert(
             id,
             Ticket {
+                priority: priority.min(10),
                 generation: self.generation,
                 queued_at: now,
                 started_at: None,
@@ -115,10 +125,10 @@ impl Queue {
         if entry.generation != generation || entry.phase != Phase::Queued {
             return Err("Start request was cancelled or replaced");
         }
-        if self.waiting.front() != Some(&id) || self.active() >= self.limit {
+        if self.ordered_waiting(now).first() != Some(&id) || self.active() >= self.limit {
             return Ok(false);
         }
-        self.waiting.pop_front();
+        self.waiting.retain(|candidate| *candidate != id);
         let entry = self.entries.get_mut(&id).unwrap();
         entry.phase = Phase::Starting;
         entry.started_at = Some(now);
@@ -160,17 +170,70 @@ impl Queue {
     pub fn ticket(&self, id: u128) -> Option<&Ticket> {
         self.entries.get(&id)
     }
-    pub fn position(&self, id: u128) -> usize {
-        self.waiting
+    pub fn effective_priority(ticket: &Ticket, now: u64) -> u64 {
+        u64::from(ticket.priority) + now.saturating_sub(ticket.queued_at) / 300_000
+    }
+    fn ordered_waiting(&self, now: u64) -> Vec<u128> {
+        let mut ids: Vec<_> = self.waiting.iter().copied().collect();
+        ids.sort_by(|a, b| {
+            let a = &self.entries[a];
+            let b = &self.entries[b];
+            Self::effective_priority(b, now)
+                .cmp(&Self::effective_priority(a, now))
+                .then(a.generation.cmp(&b.generation))
+        });
+        ids
+    }
+    pub fn position_at(&self, id: u128, now: u64) -> usize {
+        self.ordered_waiting(now)
             .iter()
             .position(|x| *x == id)
             .map_or(0, |n| n + 1)
+    }
+    pub fn position(&self, id: u128) -> usize {
+        self.position_at(id, 0)
+    }
+    pub fn entries(&self) -> impl Iterator<Item = (&u128, &Ticket)> {
+        self.entries.iter()
+    }
+    pub fn external(&self) -> impl Iterator<Item = &u128> {
+        self.external.iter()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn priority_orders_waiters_without_preempting_active_and_fifo_breaks_ties() {
+        let mut q = Queue::new(1);
+        let a = q.reserve_priority(1, 0, 0).unwrap();
+        q.admit(1, a, 1).unwrap();
+        let b = q.reserve_priority(2, 2, 0).unwrap();
+        let c = q.reserve_priority(3, 3, 10).unwrap();
+        let d = q.reserve_priority(4, 4, 10).unwrap();
+        assert!(!q.admit(3, c, 5).unwrap());
+        assert_eq!(q.position_at(3, 5), 1);
+        assert_eq!(q.position_at(4, 5), 2);
+        assert_eq!(q.position_at(2, 5), 3);
+        q.finish(1, a, 6, true);
+        assert!(q.admit(3, c, 7).unwrap());
+        assert!(!q.admit(4, d, 8).unwrap());
+        q.finish(3, c, 9, true);
+        assert!(q.admit(4, d, 10).unwrap());
+        q.finish(4, d, 11, true);
+        assert!(q.admit(2, b, 12).unwrap());
+    }
+    #[test]
+    fn aging_prevents_indefinite_starvation_and_position_matches_admission() {
+        let mut q = Queue::new(1);
+        let old = q.reserve_priority(1, 0, 0).unwrap();
+        let new = q.reserve_priority(2, 3_300_000, 10).unwrap();
+        assert_eq!(q.position_at(1, 3_300_000), 1);
+        assert_eq!(q.position_at(2, 3_300_000), 2);
+        assert!(!q.admit(2, new, 3_300_000).unwrap());
+        assert!(q.admit(1, old, 3_300_000).unwrap());
+    }
     #[test]
     fn fifo_four_slots_and_no_fifth_until_ready() {
         let mut q = Queue::new(4);

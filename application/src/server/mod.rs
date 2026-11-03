@@ -1306,9 +1306,19 @@ impl Server {
             "starting server"
         );
 
-        let mut reservation = startup_queue::reserve(
+        // Fail visibly on a policy lookup failure rather than silently losing a
+        // paid entitlement. A missing older extension explicitly falls back to FIFO.
+        let priority = self
+            .app_state
+            .config
+            .client
+            .startup_priority(self.uuid)
+            .await
+            .map_err(|err| self.report_power_error(crate::models::ServerPowerAction::Start, err))?;
+        let mut reservation = startup_queue::reserve_priority(
             self.uuid,
             self.app_state.config.load().limits.server_concurrent_starts,
+            priority,
         )?;
         let server = self.clone();
         tokio::spawn(async move {

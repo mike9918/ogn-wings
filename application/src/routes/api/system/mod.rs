@@ -9,6 +9,7 @@ mod overview;
 mod restic;
 mod stats;
 mod upgrade;
+mod startup_queue;
 
 mod get {
     use crate::{
@@ -76,6 +77,7 @@ mod get {
 pub fn router(state: &State) -> OpenApiRouter<State> {
     OpenApiRouter::new()
         .routes(routes!(get::route))
+        .nest("/startup-queue", startup_queue::router(state))
         .nest("/overview", overview::router(state))
         .nest("/ips", ips::router(state))
         .nest("/logs", logs::router(state))

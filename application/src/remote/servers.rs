@@ -187,3 +187,30 @@ pub async fn set_server_startup_docker_image(
 
     Ok(())
 }
+
+/// Priority is obtained only through the node-authenticated panel API.
+/// No customer power payload can provide it. Missing older extensions use FIFO.
+pub async fn get_startup_priority(client: &Client, uuid: uuid::Uuid) -> Result<u8, anyhow::Error> {
+    #[derive(Deserialize)]
+    struct Policy {
+        priority: u8,
+    }
+    let response = client
+        .client
+        .get(format!(
+            "{}/servers/{}/ogn-startup-policy",
+            client.url, uuid
+        ))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(0);
+    }
+    let policy: Policy = response.error_for_remote_status().await?.json().await?;
+    anyhow::ensure!(
+        policy.priority <= 10,
+        "Invalid hosting plan startup priority"
+    );
+    Ok(policy.priority)
+}
