@@ -1,4 +1,4 @@
-//! Node-local FIFO admission policy. No power actions or async runtime here.
+//! Node-local priority admission policy. No power actions or async runtime here.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub struct Ticket {
     pub finished_at: Option<u64>,
     pub phase: Phase,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Queue {
     limit: usize,
     generation: u64,
@@ -54,6 +54,15 @@ impl Queue {
             waiting: VecDeque::new(),
             external: BTreeSet::new(),
         }
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn restore_pending(&mut self, mut entries: Vec<(u128, Ticket)>, generation: u64) {
+        entries.sort_by_key(|(_, e)| e.generation);
+        self.waiting = entries.iter().map(|(id, _)| *id).collect();
+        self.entries = entries.into_iter().collect();
+        self.generation = generation;
     }
     pub fn set_limit(&mut self, limit: usize) {
         self.limit = limit.clamp(1, 64);
@@ -97,7 +106,10 @@ impl Queue {
             Ticket {
                 priority: priority.min(10),
                 generation: self.generation,
-                queued_at: now,
+                queued_at: self
+                    .entries
+                    .get(&id)
+                    .map_or(now, |old| now.max(old.queued_at.saturating_add(1))),
                 started_at: None,
                 finished_at: None,
                 phase: Phase::Queued,

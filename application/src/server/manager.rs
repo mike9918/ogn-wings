@@ -56,6 +56,23 @@ impl ServerManager {
             .config
             .resolve_as_path(|cfg| &cfg.system.root_directory);
 
+        let valid = raw_servers
+            .iter()
+            .map(|server| server.settings.uuid)
+            .collect();
+        let restored = match super::startup_queue::initialize(
+            &root_directory,
+            app_state.config.load().limits.server_concurrent_starts,
+            &valid,
+        ) {
+            Ok(restored) => restored,
+            Err(error) => {
+                tracing::error!(%error,"OGN queue journal recovery failed; new startup admission is blocked");
+                Vec::new()
+            }
+        };
+        let attachments = Arc::new(std::sync::Mutex::new(Vec::new()));
+
         let states_path = root_directory.join("states.json");
         let mut states: HashMap<uuid::Uuid, ServerState> = serde_json::from_str(
             tokio::fs::read_to_string(&states_path)
@@ -87,6 +104,7 @@ impl ServerManager {
                 app_state.clone(),
             );
             let state = states.remove(&server.uuid).unwrap_or_default();
+            server.state.restore_previous_starting(state);
 
             server.initialize_schedules().await;
             server.filesystem.attach().await;
@@ -94,9 +112,10 @@ impl ServerManager {
             let spawn_start_task = {
                 let semaphore = Arc::clone(&semaphore);
                 let server = server.clone();
+                let attachments = Arc::clone(&attachments);
 
                 move || {
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         tracing::info!(
                             server = %server.uuid,
                             "restoring server state {:?}",
@@ -125,21 +144,27 @@ impl ServerManager {
                                 crate::models::ServerAutoStartBehavior::Never => false,
                             };
 
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        if do_autostart
-                            && !matches!(
-                                server.state.get_state(),
-                                ServerState::Running | ServerState::Starting
-                            )
-                        {
-                            let _permit = match semaphore.acquire().await {
-                                Ok(p) => p,
-                                Err(_) => return,
-                            };
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            if do_autostart
+                                && !matches!(
+                                    server.state.get_state(),
+                                    ServerState::Running | ServerState::Starting
+                                )
+                            {
+                                let _permit = match semaphore.acquire().await {
+                                    Ok(p) => p,
+                                    Err(_) => return,
+                                };
 
-                            server.start(None, false).await.ok();
-                        }
+                                server.start(None, false).await.ok();
+                            }
+                        });
                     });
+                    attachments
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .push(handle);
                 }
             };
 
@@ -204,6 +229,36 @@ impl ServerManager {
             servers.push(server);
         }
 
+        drop(servers);
+        // All containers are attached before replaying accepted waiting requests.
+        // In particular, never recreate a container based on a stale Offline snapshot.
+        let handles = std::mem::take(&mut *attachments.lock().unwrap_or_else(|p| p.into_inner()));
+        for handle in handles {
+            if let Err(error) = handle.await {
+                tracing::error!(%error,"server attachment task failed");
+            }
+        }
+        for (id, generation) in restored {
+            let Some(server) = self.get_server(id).await else {
+                continue;
+            };
+            let Some(reservation) = super::startup_queue::restored_reservation(id, generation)
+            else {
+                continue;
+            };
+            if server.state.get_state() != ServerState::Offline || server.locked_state().is_some() {
+                if let Err(error) = super::startup_queue::try_cancel(id) {
+                    tracing::error!(%id,%error,"could not reconcile restored queued request");
+                }
+                drop(reservation);
+                continue;
+            }
+            tokio::spawn(async move {
+                if let Err(error) = server.start_reserved(reservation, None, false).await {
+                    tracing::error!(server=%id,%error,"restored startup request failed");
+                }
+            });
+        }
         self.booted.store(true, Ordering::SeqCst);
 
         tokio::spawn({
@@ -359,7 +414,10 @@ impl ServerManager {
 
     pub async fn delete_server(&self, server: &Server) {
         // OGN_STARTUP_QUEUE: deleting a queued server must cancel its pending start.
-        super::startup_queue::cancel(server.uuid);
+        server.set_suspended(true).await;
+        if let Err(error) = super::startup_queue::try_cancel(server.uuid) {
+            tracing::error!(server=%server.uuid,%error,"could not persist deletion of queued startup intent");
+        }
         let mut servers = self.servers.write().await;
 
         if let Some(pos) = servers.iter().position(|s| s.uuid == server.uuid) {

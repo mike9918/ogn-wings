@@ -117,6 +117,12 @@ impl ServerStateLock {
         }
     }
 
+    pub fn restore_previous_starting(&self, previous: ServerState) {
+        if previous == ServerState::Starting && self.get_state() == ServerState::Offline {
+            self.state.send_replace(ServerState::Starting);
+        }
+    }
+
     pub fn persist_starting(&self) -> std::io::Result<()> {
         if let Some(marker) = &self.startup_marker {
             marker.persist()?;

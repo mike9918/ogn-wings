@@ -45,12 +45,14 @@ impl Manager {
         self.servers.read().await
     }
 }
+#[path = "../../../application/src/server/startup_journal.rs"]
+pub mod startup_journal;
+#[path = "../../../application/src/server/startup_marker.rs"]
+pub mod startup_marker;
 #[path = "../../../application/src/server/startup_queue.rs"]
 pub mod startup_queue;
 #[path = "../../../application/src/server/startup_queue_core.rs"]
 pub mod startup_queue_core;
-#[path = "../../../application/src/server/startup_marker.rs"]
-pub mod startup_marker;
 
 #[cfg(test)]
 mod tests {
@@ -109,5 +111,55 @@ mod tests {
         }
         startup_queue::refresh(&servers[5]).await;
         assert_eq!(startup_queue::snapshot(servers[5].uuid).unwrap().active, 0);
+        // Exercise the actual adapter across a simulated restart, not just JSON round trips.
+        let dir = tempfile::tempdir().unwrap();
+        let valid = servers.iter().map(|s| s.uuid).collect();
+        assert!(
+            startup_queue::initialize(dir.path(), 4, &valid)
+                .unwrap()
+                .is_empty()
+        );
+        for server in &servers[..4] {
+            server.state.set(1);
+        }
+        let pending = startup_queue::reserve_priority(servers[5].uuid, 4, 7).unwrap();
+        let original = startup_queue::snapshot(servers[5].uuid).unwrap();
+        drop(pending); // The daemon shutting down must not cancel accepted waiters.
+        let recovered = startup_queue::initialize(dir.path(), 4, &valid).unwrap();
+        assert_eq!(recovered.len(), 1);
+        let restored = startup_queue::snapshot(servers[5].uuid).unwrap();
+        assert_eq!(restored.priority, 7);
+        assert_eq!(restored.queued_at, original.queued_at);
+        let reservation =
+            startup_queue::restored_reservation(recovered[0].0, recovered[0].1).unwrap();
+        let server = servers[5].clone();
+        let task = tokio::spawn(async move { reservation.acquire(&server).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!task.is_finished());
+        assert!(
+            !startup_queue::try_cancel_ticket(servers[5].uuid, Some(restored.queued_at - 1))
+                .unwrap()
+        );
+        assert!(
+            startup_queue::try_cancel_ticket(servers[5].uuid, Some(restored.queued_at)).unwrap()
+        );
+        assert!(task.await.unwrap().is_err());
+        assert!(
+            startup_queue::initialize(dir.path(), 4, &valid)
+                .unwrap()
+                .is_empty()
+        );
+        let path = dir.path().join(".ogn-startup-queue.json");
+        std::fs::write(&path, b"{invalid").unwrap();
+        assert!(startup_queue::initialize(dir.path(), 4, &valid).is_err());
+        assert!(startup_queue::reserve(servers[5].uuid, 4).is_err());
+        assert!(!startup_queue::node_snapshot(4).available);
+        assert_eq!(std::fs::read(&path).unwrap(), b"{invalid");
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            startup_queue::initialize(dir.path(), 4, &valid)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

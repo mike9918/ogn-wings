@@ -1,11 +1,16 @@
+use super::startup_journal::Journal;
 use super::startup_queue_core::Queue;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Notify;
 
 struct Shared {
     core: Mutex<Queue>,
     changed: Notify,
+    journal: Mutex<Option<Journal>>,
+    ready: AtomicBool,
+    storage_error: Mutex<Option<&'static str>>,
 }
 fn shared() -> Arc<Shared> {
     static INSTANCE: OnceLock<Arc<Shared>> = OnceLock::new();
@@ -14,6 +19,9 @@ fn shared() -> Arc<Shared> {
             Arc::new(Shared {
                 core: Mutex::new(Queue::new(4)),
                 changed: Notify::new(),
+                journal: Mutex::new(None),
+                ready: AtomicBool::new(cfg!(test)),
+                storage_error: Mutex::new(None),
             })
         })
         .clone()
@@ -24,6 +32,96 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u64::MAX as u128) as u64
+}
+fn persist(shared: &Shared, queue: &Queue) -> Result<(), anyhow::Error> {
+    let journal = shared.journal.lock().unwrap_or_else(|p| p.into_inner());
+    let result = match journal.as_ref() {
+        Some(journal) => journal.save(queue),
+        None if cfg!(test) => Ok(()),
+        None => Err(anyhow::anyhow!("Queue journal is not initialized")),
+    };
+    let mut error = shared
+        .storage_error
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    match result {
+        Ok(()) => {
+            *error = None;
+            Ok(())
+        }
+        Err(failure) => {
+            if error.is_none() {
+                tracing::error!(error=%failure,"OGN queue persistence failed; startup admission paused");
+            }
+            *error = Some("Queue storage needs attention; startup admission is blocked.");
+            Err(failure)
+        }
+    }
+}
+/// Load waiting requests before exposing servers. Invalid files remain untouched.
+pub fn initialize(
+    root: &std::path::Path,
+    limit: usize,
+    valid: &std::collections::HashSet<uuid::Uuid>,
+) -> Result<Vec<(uuid::Uuid, u64)>, anyhow::Error> {
+    let shared = shared();
+    shared.ready.store(false, Ordering::SeqCst);
+    let journal = Journal::new(root);
+    let loaded = journal.load(limit).and_then(|mut queue| {
+        let stale: Vec<_> = queue
+            .entries()
+            .filter(|(id, _)| !valid.contains(&uuid::Uuid::from_u128(**id)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            queue.cancel(id, now());
+        }
+        journal.save(&queue)?;
+        Ok(queue)
+    });
+    match loaded {
+        Ok(queue) => {
+            let restored = queue
+                .entries()
+                .filter(|(_, e)| e.phase == super::startup_queue_core::Phase::Queued)
+                .map(|(id, e)| (uuid::Uuid::from_u128(*id), e.generation))
+                .collect();
+            *shared.core.lock().unwrap_or_else(|p| p.into_inner()) = queue;
+            *shared.journal.lock().unwrap_or_else(|p| p.into_inner()) = Some(journal);
+            *shared
+                .storage_error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
+            shared.ready.store(true, Ordering::SeqCst);
+            Ok(restored)
+        }
+        Err(error) => {
+            *shared
+                .storage_error
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(
+                "Queue journal could not be recovered; startup admission is blocked. Check Wings logs.",
+            );
+            Err(error)
+        }
+    }
+}
+pub fn restored_reservation(id: uuid::Uuid, generation: u64) -> Option<Reservation> {
+    let shared = shared();
+    let matches = shared
+        .core
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .ticket(id.as_u128())
+        .is_some_and(|e| {
+            e.generation == generation && e.phase == super::startup_queue_core::Phase::Queued
+        });
+    matches.then_some(Reservation {
+        shared,
+        id: id.as_u128(),
+        generation,
+        finished: false,
+    })
 }
 pub struct Reservation {
     shared: Arc<Shared>,
@@ -49,8 +147,21 @@ impl Reservation {
             let admitted = {
                 let mut core = self.shared.core.lock().unwrap_or_else(|p| p.into_inner());
                 core.set_external(external);
-                core.admit(self.id, self.generation, now())
+                let mut candidate = core.clone();
+                if candidate
+                    .admit(self.id, self.generation, now())
                     .map_err(anyhow::Error::msg)?
+                {
+                    // A failed durable transition leaves the waiter and worker intact.
+                    if persist(&self.shared, &candidate).is_ok() {
+                        *core = candidate;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             };
             if admitted {
                 self.shared.changed.notify_waiters();
@@ -79,6 +190,20 @@ impl Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.finished {
+            let waiting = self
+                .shared
+                .core
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .ticket(self.id)
+                .is_some_and(|e| {
+                    e.generation == self.generation
+                        && e.phase == super::startup_queue_core::Phase::Queued
+                });
+            // Runtime shutdown drops waiting workers; their accepted intent must survive.
+            if waiting {
+                return;
+            }
             self.finish(false);
         }
     }
@@ -93,11 +218,20 @@ pub fn reserve_priority(
     priority: u8,
 ) -> Result<Reservation, anyhow::Error> {
     let shared = shared();
+    anyhow::ensure!(
+        shared.ready.load(Ordering::SeqCst),
+        "Startup queue recovery needs attention; admission is blocked"
+    );
     let generation = {
         let mut core = shared.core.lock().unwrap_or_else(|p| p.into_inner());
-        core.set_limit(limit);
-        core.reserve_priority(id.as_u128(), now(), priority)
-            .map_err(anyhow::Error::msg)?
+        let mut candidate = core.clone();
+        candidate.set_limit(limit);
+        let generation = candidate
+            .reserve_priority(id.as_u128(), now(), priority)
+            .map_err(anyhow::Error::msg)?;
+        persist(&shared, &candidate)?;
+        *core = candidate;
+        generation
     };
     shared.changed.notify_waiters();
     Ok(Reservation {
@@ -107,21 +241,35 @@ pub fn reserve_priority(
         finished: false,
     })
 }
+#[cfg(test)]
 pub fn cancel(id: uuid::Uuid) -> bool {
-    cancel_ticket(id, None)
+    try_cancel(id).unwrap()
 }
-pub fn cancel_ticket(id: uuid::Uuid, queued_at: Option<u64>) -> bool {
+pub fn try_cancel(id: uuid::Uuid) -> Result<bool, anyhow::Error> {
+    try_cancel_ticket(id, None)
+}
+pub fn try_cancel_ticket(id: uuid::Uuid, queued_at: Option<u64>) -> Result<bool, anyhow::Error> {
     let s = shared();
     let cancelled = {
         let mut q = s.core.lock().unwrap_or_else(|p| p.into_inner());
-        if queued_at.is_some_and(|time| q.ticket(id.as_u128()).is_none_or(|e| e.queued_at != time)) {
+        if queued_at.is_some_and(|time| q.ticket(id.as_u128()).is_none_or(|e| e.queued_at != time))
+        {
             false
-        } else { q.cancel(id.as_u128(), now()) }
+        } else {
+            let mut candidate = q.clone();
+            if candidate.cancel(id.as_u128(), now()) {
+                persist(&s, &candidate)?;
+                *q = candidate;
+                true
+            } else {
+                false
+            }
+        }
     };
     if cancelled {
         s.changed.notify_waiters();
     }
-    cancelled
+    Ok(cancelled)
 }
 pub async fn refresh(server: &super::Server) {
     observe_servers(
@@ -147,6 +295,7 @@ pub fn observe_servers(servers: &[super::Server]) {
 }
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct Snapshot {
+    pub durable_waiting: bool,
     pub priority: u8,
     pub effective_priority: u64,
     pub phase: &'static str,
@@ -171,6 +320,7 @@ fn snapshot_locked(
     time: u64,
 ) -> Snapshot {
     Snapshot {
+        durable_waiting: shared().ready.load(Ordering::SeqCst),
         priority: e.priority,
         effective_priority: Queue::effective_priority(
             e,
@@ -202,6 +352,8 @@ pub struct NodeEntry {
 pub struct NodeSnapshot {
     pub available: bool,
     pub priority_supported: bool,
+    pub durable_waiting: bool,
+    pub error: Option<&'static str>,
     pub limit: usize,
     pub active: usize,
     pub queued: usize,
@@ -234,6 +386,7 @@ pub fn node_snapshot(limit: usize) -> NodeSnapshot {
                 server_uuid: uuid::Uuid::from_u128(*id).to_string(),
                 recovered: true,
                 status: Snapshot {
+                    durable_waiting: shared.ready.load(Ordering::SeqCst),
                     priority: 0,
                     effective_priority: 0,
                     phase: "starting",
@@ -267,9 +420,13 @@ pub fn node_snapshot(limit: usize) -> NodeSnapshot {
             history <= 50
         }
     });
+    let storage_error = *shared.storage_error.lock().unwrap_or_else(|p| p.into_inner());
+    let ready = shared.ready.load(Ordering::SeqCst);
     NodeSnapshot {
-        available: true,
+        available: ready && storage_error.is_none(),
         priority_supported: true,
+        durable_waiting: ready,
+        error: storage_error,
         limit: q.limit(),
         active: q.active(),
         queued,

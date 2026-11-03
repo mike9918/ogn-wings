@@ -33,6 +33,7 @@ pub mod schedule;
 pub mod script;
 pub mod state;
 // OGN_STARTUP_QUEUE
+pub mod startup_journal;
 pub mod startup_marker;
 pub mod startup_queue;
 pub mod startup_queue_core;
@@ -1336,11 +1337,21 @@ impl Server {
             .startup_priority(self.uuid)
             .await
             .map_err(|err| self.report_power_error(crate::models::ServerPowerAction::Start, err))?;
-        let mut reservation = startup_queue::reserve_priority(
+        let reservation = startup_queue::reserve_priority(
             self.uuid,
             self.app_state.config.load().limits.server_concurrent_starts,
             priority,
         )?;
+        self.start_reserved(reservation, aquire_timeout, skip_schedules)
+            .await
+    }
+
+    pub(crate) async fn start_reserved(
+        &self,
+        mut reservation: startup_queue::Reservation,
+        aquire_timeout: Option<std::time::Duration>,
+        skip_schedules: bool,
+    ) -> Result<(), anyhow::Error> {
         let server = self.clone();
         tokio::spawn(async move {
             reservation.acquire(&server).await?;
@@ -1517,7 +1528,7 @@ impl Server {
     }
 
     pub async fn kill(&self, skip_schedules: bool) -> Result<(), anyhow::Error> {
-        if startup_queue::cancel(self.uuid) {
+        if startup_queue::try_cancel(self.uuid)? {
             return Ok(());
         }
         if self.state.get_state() == state::ServerState::Offline {
@@ -1561,7 +1572,7 @@ impl Server {
         aquire_timeout: Option<std::time::Duration>,
         skip_schedules: bool,
     ) -> Result<(), anyhow::Error> {
-        if startup_queue::cancel(self.uuid) {
+        if startup_queue::try_cancel(self.uuid)? {
             return Ok(());
         }
         if self.state.get_state() == state::ServerState::Offline {
@@ -1768,7 +1779,7 @@ impl Server {
         if matches!(
             action,
             crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
-        ) && startup_queue::cancel(self.uuid)
+        ) && startup_queue::try_cancel(self.uuid)?
         {
             return Ok(());
         }
@@ -1802,7 +1813,7 @@ impl Server {
         if matches!(
             action,
             crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
-        ) && startup_queue::cancel(self.uuid)
+        ) && startup_queue::try_cancel(self.uuid).map_err(PowerActionError::Internal)?
         {
             return Ok(());
         }
