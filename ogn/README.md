@@ -2,7 +2,7 @@
 
 Minimal native startup-admission fork of Calagopus Wings. Upstream licensing and
 attribution are retained. The upstream release and commit are recorded in
-`ogn/upstream.json`; OGN releases add build metadata, initially `1.2.8+ogn.1`.
+`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.2`.
 The stable version requirement remains compatible with Panel 1.2.8, while update
 checks and system information distinguish OGN revisions.
 
@@ -31,8 +31,13 @@ Wings' control.
 The authenticated per-server `/startup-queue` endpoint supplies queue position,
 wait/start timestamps and slot counts. The OGN panel extension proxies it without
 exposing node credentials. Queued requests/history are currently memory-local and
-are not replayed after a daemon restart. Recovery behavior must pass the live dev
-checks before release; standalone policy tests alone are not deployment evidence.
+are not replayed after a daemon restart. Durable per-server admission markers
+restore unfinished containers as Starting before attachment, retaining their slots.
+The current container log tail (10,000 lines, at most 4 MiB) is replayed to detect
+readiness emitted during the outage; if readiness is absent from that bound, the
+server conservatively retains its slot until a new readiness line or Stop. Marker
+files are outside server-controlled storage. Live recovery checks are required
+before release; policy tests alone are not deployment evidence.
 
 ## Build and release
 

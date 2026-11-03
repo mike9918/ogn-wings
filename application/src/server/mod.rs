@@ -32,6 +32,7 @@ pub mod schedule;
 pub mod script;
 pub mod state;
 // OGN_STARTUP_QUEUE
+pub mod startup_marker;
 pub mod startup_queue;
 pub mod startup_queue_core;
 pub mod transfer;
@@ -274,6 +275,12 @@ impl Server {
         )));
 
         let suspended = configuration.suspended;
+        let startup_marker = startup_marker::Marker::new(
+            &app_state
+                .config
+                .resolve_as_path(|cfg| &cfg.system.root_directory),
+            configuration.uuid,
+        );
         let server = Self(Arc::new(InnerServer {
             uuid: configuration.uuid,
             app_state,
@@ -295,7 +302,8 @@ impl Server {
             diff,
             activity,
 
-            state: state::ServerStateLock::new(websocket_tx, schedules),
+            state: state::ServerStateLock::new(websocket_tx, schedules)
+                .with_startup_marker(startup_marker),
             outgoing_transfer: RwLock::new(None),
             incoming_transfer: RwLock::new(None),
             installer: RwLock::new(None),
@@ -318,6 +326,8 @@ impl Server {
                 filesystem::sqlite::QUERY_MAX_CONCURRENT,
             ),
         }));
+
+        server.state.restore_starting();
 
         server.spawn_stats_forwarder();
         server.spawn_trash_purge_task();
@@ -439,6 +449,22 @@ impl Server {
             }
         };
 
+        // Subscribe first, then replay this container's bounded log tail. A
+        // readiness line emitted while Wings was offline must not be lost.
+        let replay = if self.state.get_state() == state::ServerState::Starting {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let reader = process_handle.logs(Some(10_000)).await?;
+                let mut bytes = Vec::new();
+                reader.take(4 * 1024 * 1024).read_to_end(&mut bytes).await?;
+                anyhow::Ok(String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+        } else {
+            None
+        };
+
         let old_task = self
             .process_startup_task
             .write()
@@ -490,6 +516,14 @@ impl Server {
 
                     false
                 };
+
+                if let Some(replay) = replay {
+                    for line in replay.lines() {
+                        if check_startup(line).await {
+                            return;
+                        }
+                    }
+                }
 
                 loop {
                     match stdout_lines.recv().await {
@@ -1120,6 +1154,7 @@ impl Server {
             }
             Err(err) => {
                 tracing::debug!(server = %self.uuid, "no running container to attach to: {}", err);
+                self.state.set_state(state::ServerState::Offline).await;
             }
         }
 
@@ -1398,6 +1433,7 @@ impl Server {
                             None => return Ok(()),
                         };
 
+                        server.state.persist_starting()?;
                         process_handle.start().await?;
 
                         Ok(())
