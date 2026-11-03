@@ -75,6 +75,7 @@ impl Queue {
                 .filter(|id| !self.entries.get(id).is_some_and(|e| e.phase.holds_slot()))
                 .count()
     }
+    #[cfg(test)]
     pub fn reserve(&mut self, id: u128, now: u64) -> Result<u64, &'static str> {
         self.reserve_priority(id, now, 0)
     }
@@ -190,6 +191,7 @@ impl Queue {
             .position(|x| *x == id)
             .map_or(0, |n| n + 1)
     }
+    #[cfg(test)]
     pub fn position(&self, id: u128) -> usize {
         self.position_at(id, 0)
     }
