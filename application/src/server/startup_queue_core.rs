@@ -48,7 +48,7 @@ pub struct Queue {
 impl Queue {
     pub fn new(limit: usize) -> Self {
         Self {
-            limit: limit.max(1),
+            limit: limit.clamp(1, 64),
             generation: 0,
             entries: BTreeMap::new(),
             waiting: VecDeque::new(),

@@ -133,6 +133,8 @@ mod tests {
         q.reserve_priority(2, 200, 7).unwrap();
         q.reserve_priority(3, 201, 7).unwrap();
         journal.save(&q).unwrap();
+        assert_eq!(journal.load(100).unwrap().limit(), 64);
+        assert_eq!(journal.load(0).unwrap().limit(), 1);
         let mut restored = journal.load(1).unwrap();
         assert_eq!(restored.ticket(id).unwrap().queued_at, 100);
         assert_eq!(restored.position_at(2, 202), 1);
