@@ -83,6 +83,7 @@ impl Drop for Reservation {
         }
     }
 }
+#[cfg(test)]
 pub fn reserve(id: uuid::Uuid, limit: usize) -> Result<Reservation, anyhow::Error> {
     reserve_priority(id, limit, 0)
 }
