@@ -307,6 +307,9 @@ pub struct Snapshot {
     pub finished_at: Option<u64>,
     pub server_time: u64,
 }
+pub fn storage_error() -> Option<&'static str> {
+    *shared().storage_error.lock().unwrap_or_else(|p| p.into_inner())
+}
 pub fn snapshot(id: uuid::Uuid) -> Option<Snapshot> {
     let s = shared();
     let q = s.core.lock().unwrap_or_else(|p| p.into_inner());

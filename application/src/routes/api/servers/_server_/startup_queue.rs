@@ -7,7 +7,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 #[utoipa::path(get,path="/",responses((status=OK,body=serde_json::Value)))]
 async fn get(server: GetServer) -> ApiResponseResult {
     crate::server::startup_queue::refresh(&server).await;
-    ApiResponse::new_serialized(serde_json::json!({"available":true,"queue":crate::server::startup_queue::snapshot(server.uuid)})).ok()
+    ApiResponse::new_serialized(serde_json::json!({"available":true,"error":crate::server::startup_queue::storage_error(),"queue":crate::server::startup_queue::snapshot(server.uuid)})).ok()
 }
 #[derive(serde::Deserialize)]
 struct CancelParams { queued_at: Option<u64> }
