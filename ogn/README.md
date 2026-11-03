@@ -2,7 +2,7 @@
 
 Minimal native startup-admission fork of Calagopus Wings. Upstream licensing and
 attribution are retained. The upstream release and commit are recorded in
-`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.2`.
+`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.3`.
 The stable version requirement remains compatible with Panel 1.2.8, while update
 checks and system information distinguish OGN revisions.
 
@@ -20,7 +20,7 @@ limits:
   server_concurrent_starts: 4
 ```
 
-The node-wide FIFO limit covers preparation and Starting until Running or Offline.
+The node-wide admission limit covers preparation and Starting until Running or Offline.
 Queued servers remain offline and consume no container/session uptime. Duplicate
 requests do not create extra tickets. Stop cancels a queued start; cancellation of
 an already admitted request returns a conflict instead of unexpectedly stopping it.
@@ -75,3 +75,19 @@ For AIO development, use the Panel's supported build-time `WINGS_BINARY_PATH` an
 `WINGS_RELEASE` inputs and force a managed rebuild. Retain the stock embedded Wings
 and previous Panel binary for rollback. A Panel extension rebuild by itself does
 not install this fork. Production deployment remains a separate step.
+
+## Plan priorities and admin monitoring (OGN revision 3)
+
+Before admission Wings reads `/api/remote/servers/{uuid}/ogn-startup-policy`
+using its existing node authentication. The hosting extension resolves the
+owner's plan to priority 0–10; larger numbers start first. Unassigned accounts
+and older extensions without this endpoint use priority zero. Lookup errors
+reject Start visibly instead of silently discarding a paid entitlement.
+Priority is captured for that request; changing a plan affects future requests.
+
+Each five full minutes waiting adds one effective priority level, without a cap,
+so a continuous stream of new high-priority requests cannot starve an older one.
+Ties remain FIFO; active starts are never preempted. The authenticated node
+`/api/system/startup-queue` snapshot supplies active, waiting and recent outcomes,
+including recovered starts whose earlier timing is unavailable. Per-server
+cancellation accepts an optional queued_at match checked under the queue mutex.
