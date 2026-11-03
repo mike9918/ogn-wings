@@ -1,0 +1,48 @@
+name: Check upstream compatibility
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream branch or released tag to test, without merging or deploying
+        default: main
+        required: true
+        type: string
+  schedule:
+    - cron: '25 8 * * *'
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+      CARGO_BUILD_JOBS: '2'
+      WINGS_UPGRADE_REPOSITORY: mike9918/ogn-wings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Test merge in this disposable checkout only
+        run: |
+          python3 -c 'import os,re; assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./+-]*",os.environ["UPSTREAM_REF"])'
+          git remote add ogn-upstream https://github.com/calagopus/wings.git
+          git fetch ogn-upstream "$UPSTREAM_REF"
+          git -c user.name=OGN -c user.email=ogn@example.invalid merge --no-commit --no-ff FETCH_HEAD
+          git diff --stat HEAD
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          toolchain: '1.99.1'
+      - name: Build dependencies and pinned Fusequota
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev cmake protobuf-compiler unzip
+          curl -fLsS --connect-timeout 15 --max-time 120 https://github.com/calagopus/fusequota/releases/download/abb9080/fusequota-x86_64-linux -o "$RUNNER_TEMP/fusequota"
+          echo "785fe31ab361fd14e9db81d28d63b9488e3c01a5ff629bf2ac1eda04c8470b7d  $RUNNER_TEMP/fusequota" | sha256sum -c -
+          echo "FUSEQUOTA_BINARY_PATH=$RUNNER_TEMP/fusequota" >> "$GITHUB_ENV"
+          echo 'FUSEQUOTA_RELEASE=abb9080' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Queue behavior and full integration compile
+        run: |
+          cargo test --manifest-path ogn/checks/Cargo.toml
+          cargo --config 'profile.dev.package."*".opt-level=0' check -p wings-rs

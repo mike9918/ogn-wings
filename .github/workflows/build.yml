@@ -7,6 +7,7 @@ on:
 
 jobs:
   publish:
+    if: github.repository == 'calagopus/wings'
     name: Build and Publish
     uses: ./.github/workflows/build-and-publish.yml
     permissions:
