@@ -207,6 +207,10 @@ impl Client {
         Ok(servers)
     }
 
+    pub async fn startup_priority(&self, uuid: uuid::Uuid) -> Result<u8, anyhow::Error> {
+        super::servers::get_startup_priority(self, uuid).await
+    }
+
     pub async fn server(
         &self,
         uuid: uuid::Uuid,

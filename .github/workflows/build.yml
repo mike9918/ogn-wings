@@ -13,6 +13,7 @@ env:
 
 jobs:
   dist:
+    if: github.repository == 'calagopus/wings'
     name: Dist
     runs-on: ${{ matrix.os }}
     strategy:
@@ -85,6 +86,7 @@ jobs:
           path: dist/${{ env.BIN_NAME }}-${{ matrix.build }}
 
   create-multiarch-image:
+    if: github.repository == 'calagopus/wings'
     name: Create multi-arch Docker image
     needs: [dist]
     runs-on: ubuntu-24.04
