@@ -2,7 +2,7 @@ name: OGN queue validation
 on:
   pull_request:
   push:
-    branches: ['codex/ogn-queue', 'codex/release-*']
+    branches: ['codex/release-*']
   workflow_dispatch:
 permissions:
   contents: read
