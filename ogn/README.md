@@ -2,7 +2,7 @@
 
 Minimal native startup-admission fork of Calagopus Wings. Upstream licensing and
 attribution are retained. The upstream release and commit are recorded in
-`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.3`.
+`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.4`.
 The stable version requirement remains compatible with Panel 1.2.8, while update
 checks and system information distinguish OGN revisions.
 
@@ -30,8 +30,9 @@ Wings' control.
 
 The authenticated per-server `/startup-queue` endpoint supplies queue position,
 wait/start timestamps and slot counts. The OGN panel extension proxies it without
-exposing node credentials. Queued requests/history are currently memory-local and
-are not replayed after a daemon restart. Durable per-server admission markers
+exposing node credentials. Waiting requests are atomically journaled before they appear in the queue,
+preserving captured priority, FIFO order and waiting age across daemon restarts.
+Recent completed timing history remains memory-local. Durable per-server admission markers
 restore unfinished containers as Starting before attachment, retaining their slots.
 The current container log tail (10,000 lines, at most 4 MiB) is replayed to detect
 readiness emitted during the outage; if readiness is absent from that bound, the
@@ -91,3 +92,19 @@ Ties remain FIFO; active starts are never preempted. The authenticated node
 `/api/system/startup-queue` snapshot supplies active, waiting and recent outcomes,
 including recovered starts whose earlier timing is unavailable. Per-server
 cancellation accepts an optional queued_at match checked under the queue mutex.
+
+## Durable waiting requests (OGN revision 4)
+
+The daemon-private `.ogn-startup-queue.json` stores pending intent using atomic
+replacement, file sync and directory sync. Admission and cancellation commit their
+removal before changing the visible ticket. Runtime shutdown does not cancel
+accepted waiting requests. Boot attaches containers before resuming matching
+generations. Removed or locked servers are reconciled instead of blindly replayed.
+The existing power API remains asynchronous; a visible Queued ticket is durable.
+Interrupted admitted preparation follows native autostart semantics; this journal
+covers waiting requests rather than replaying power calls.
+
+Corrupt/unsupported journals remain untouched and block admission until repaired.
+I/O failure pauses admission and fails cancellation visibly; failed writes never
+acknowledge cancellation. Snapshots expose durable_waiting and a recovery error.
+Empty the queue before rolling back to Wings that cannot read the journal.

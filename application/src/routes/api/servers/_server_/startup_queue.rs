@@ -13,7 +13,7 @@ async fn get(server: GetServer) -> ApiResponseResult {
 struct CancelParams { queued_at: Option<u64> }
 #[utoipa::path(delete,path="/",responses((status=OK,body=serde_json::Value)))]
 async fn cancel(server: GetServer, axum::extract::Query(params): axum::extract::Query<CancelParams>) -> ApiResponseResult {
-    if !crate::server::startup_queue::cancel_ticket(server.uuid, params.queued_at) {
+    if !crate::server::startup_queue::try_cancel_ticket(server.uuid, params.queued_at)? {
         return ApiResponse::error("This start has already left the queue")
             .with_status(axum::http::StatusCode::CONFLICT)
             .ok();
