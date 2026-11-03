@@ -358,6 +358,8 @@ impl ServerManager {
     }
 
     pub async fn delete_server(&self, server: &Server) {
+        // OGN_STARTUP_QUEUE: deleting a queued server must cancel its pending start.
+        super::startup_queue::cancel(server.uuid);
         let mut servers = self.servers.write().await;
 
         if let Some(pos) = servers.iter().position(|s| s.uuid == server.uuid) {

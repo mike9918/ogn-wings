@@ -31,6 +31,9 @@ pub mod resources;
 pub mod schedule;
 pub mod script;
 pub mod state;
+// OGN_STARTUP_QUEUE
+pub mod startup_queue;
+pub mod startup_queue_core;
 pub mod transfer;
 pub mod tunnel;
 pub mod websocket;
@@ -1268,9 +1271,17 @@ impl Server {
             "starting server"
         );
 
+        let mut reservation = startup_queue::reserve(
+            self.uuid,
+            self.app_state.config.load().limits.server_concurrent_starts,
+        )?;
         let server = self.clone();
         tokio::spawn(async move {
-            match server
+            reservation.acquire(&server).await?;
+            if server.locked_state().is_some() || server.state.get_state()!=state::ServerState::Offline {
+                return Err(anyhow::anyhow!("Server changed state while waiting for startup admission"));
+            }
+            let result=match server
                 .state
                 .execute_action(
                     state::ServerState::Starting,
@@ -1407,12 +1418,41 @@ impl Server {
                         ))
                     },
                     Err(err) => Err(server.report_power_error(crate::models::ServerPowerAction::Start, err)),
+                };
+                if result.is_ok() {
+                    let mut states=server.state.subscribe();
+                    let deadline=tokio::time::sleep(std::time::Duration::from_secs(300));
+                    tokio::pin!(deadline);
+                    let mut timed_out=false;
+                    loop {
+                        let current=*states.borrow_and_update();
+                        match current {
+                            state::ServerState::Running => { reservation.finish(true);break; },
+                            state::ServerState::Offline => { reservation.finish(false);break; },
+                            _=>{},
+                        }
+                        if timed_out {
+                            if states.changed().await.is_err() {break;}
+                        } else {
+                            tokio::select! {
+                                changed=states.changed()=>{if changed.is_err() {break;}},
+                                _=&mut deadline=>{
+                                    timed_out=true;reservation.attention();
+                                    server.log_daemon_with_prelude("Startup exceeded five minutes; its startup slot remains reserved until Running or Stop.");
+                                },
+                            }
+                        }
+                    }
                 }
+                result
         })
         .await?
     }
 
     pub async fn kill(&self, skip_schedules: bool) -> Result<(), anyhow::Error> {
+        if startup_queue::cancel(self.uuid) {
+            return Ok(());
+        }
         if self.state.get_state() == state::ServerState::Offline {
             return Ok(());
         }
@@ -1454,6 +1494,9 @@ impl Server {
         aquire_timeout: Option<std::time::Duration>,
         skip_schedules: bool,
     ) -> Result<(), anyhow::Error> {
+        if startup_queue::cancel(self.uuid) {
+            return Ok(());
+        }
         if self.state.get_state() == state::ServerState::Offline {
             return Err(anyhow::anyhow!("Server is already stopped."));
         }
@@ -1655,6 +1698,13 @@ impl Server {
         action: crate::models::ServerPowerAction,
         aquire_timeout: Option<std::time::Duration>,
     ) -> Result<(), anyhow::Error> {
+        if matches!(
+            action,
+            crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
+        ) && startup_queue::cancel(self.uuid)
+        {
+            return Ok(());
+        }
         use crate::models::ServerPowerAction;
 
         let auto_kill = self.configuration.read().await.auto_kill;
@@ -1682,6 +1732,13 @@ impl Server {
         &self,
         action: crate::models::ServerPowerAction,
     ) -> Result<(), PowerActionError> {
+        if matches!(
+            action,
+            crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
+        ) && startup_queue::cancel(self.uuid)
+        {
+            return Ok(());
+        }
         use crate::models::ServerPowerAction;
 
         let state = self.state.get_state();

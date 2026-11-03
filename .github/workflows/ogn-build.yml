@@ -1,0 +1,64 @@
+name: Build OGN Wings
+on:
+  workflow_dispatch:
+  push:
+    tags: ['release-*+ogn.*']
+permissions:
+  contents: read
+jobs:
+  binary:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+      WINGS_UPGRADE_REPOSITORY: mike9918/ogn-wings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          toolchain: '1.99.1'
+      - name: Verify version and tests
+        run: |
+          python3 ogn/verify_release.py
+          cargo test --locked --manifest-path ogn/checks/Cargo.toml
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' application/Cargo.toml | head -n1)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then test "$GITHUB_REF_NAME" = "release-$VERSION"; fi
+          echo "OGN_VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Build dependencies and pinned Fusequota
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev cmake protobuf-compiler unzip
+          curl -fLsS --connect-timeout 15 --max-time 120 https://github.com/calagopus/fusequota/releases/download/abb9080/fusequota-x86_64-linux -o "$RUNNER_TEMP/fusequota"
+          echo "785fe31ab361fd14e9db81d28d63b9488e3c01a5ff629bf2ac1eda04c8470b7d  $RUNNER_TEMP/fusequota" | sha256sum -c -
+          echo "FUSEQUOTA_BINARY_PATH=$RUNNER_TEMP/fusequota" >> "$GITHUB_ENV"
+          echo 'FUSEQUOTA_RELEASE=abb9080' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build x86_64 GNU Linux candidate
+        run: |
+          cargo --config profile.release.lto=false --config profile.release.codegen-units=16 build --locked --release -p wings-rs
+          mkdir dist
+          cp target/release/wings-rs dist/wings-rs-x86_64-linux
+          dist/wings-rs-x86_64-linux --version
+          (cd dist && sha256sum wings-rs-x86_64-linux > SHA256SUMS)
+          python3 ogn/verify_release.py > dist/PROVENANCE.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ogn-wings-${{ env.OGN_VERSION }}-x86_64-linux
+          path: dist/
+  draft-release:
+    if: github.ref_type == 'tag'
+    needs: binary
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create reviewable draft only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft --title "$GITHUB_REF_NAME" --notes 'OGN Wings candidate. Publish only after dev queue, restart, rollback and upgrade smoke tests pass.'

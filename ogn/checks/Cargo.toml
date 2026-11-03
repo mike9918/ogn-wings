@@ -1,0 +1,16 @@
+[package]
+name = "ogn-startup-queue-checks"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+uuid = "1"
+utoipa = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[dev-dependencies]
+semver = "1"

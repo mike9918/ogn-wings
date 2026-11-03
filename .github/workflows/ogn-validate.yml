@@ -1,0 +1,40 @@
+name: OGN queue validation
+on:
+  pull_request:
+  push:
+    branches: ['codex/ogn-queue', 'codex/release-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ogn-queue-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      WINGS_UPGRADE_REPOSITORY: mike9918/ogn-wings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f
+        with:
+          toolchain: '1.99.1'
+      - name: Queue policy, real async adapter and release identity
+        run: |
+          python3 ogn/verify_release.py
+          cargo test --locked --manifest-path ogn/checks/Cargo.toml
+      - name: Build dependencies and pinned Fusequota
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev cmake protobuf-compiler unzip
+          curl -fLsS --connect-timeout 15 --max-time 120 https://github.com/calagopus/fusequota/releases/download/abb9080/fusequota-x86_64-linux -o "$RUNNER_TEMP/fusequota"
+          echo "785fe31ab361fd14e9db81d28d63b9488e3c01a5ff629bf2ac1eda04c8470b7d  $RUNNER_TEMP/fusequota" | sha256sum -c -
+          echo "FUSEQUOTA_BINARY_PATH=$RUNNER_TEMP/fusequota" >> "$GITHUB_ENV"
+          echo 'FUSEQUOTA_RELEASE=abb9080' >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile complete Wings integration
+        run: cargo --config 'profile.dev.package."*".opt-level=0' check --locked -p wings-rs

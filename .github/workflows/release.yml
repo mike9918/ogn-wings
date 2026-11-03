@@ -13,6 +13,7 @@ env:
 
 jobs:
   generate-sbom:
+    if: github.repository == 'calagopus/wings'
     name: Generate SBOM
     runs-on: ubuntu-24.04
     permissions:
@@ -32,6 +33,7 @@ jobs:
           upload-artifact: true
 
   dist:
+    if: github.repository == 'calagopus/wings'
     name: Dist
     runs-on: ${{ matrix.os }}
     strategy:
@@ -104,6 +106,7 @@ jobs:
           path: dist/${{ env.BIN_NAME }}-${{ matrix.build }}
 
   publish-draft-release:
+    if: github.repository == 'calagopus/wings'
     name: Publish Draft Release
     needs: [dist, generate-sbom]
     runs-on: ubuntu-24.04
@@ -143,6 +146,7 @@ jobs:
             artifacts/sbom-source.cyclonedx.json/sbom-source.cyclonedx.json
 
   create-multiarch-image:
+    if: github.repository == 'calagopus/wings'
     name: Create multi-arch Docker image
     needs: [dist, generate-sbom]
     runs-on: ubuntu-24.04
