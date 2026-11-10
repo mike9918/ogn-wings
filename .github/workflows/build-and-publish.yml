@@ -26,6 +26,7 @@ env:
 
 jobs:
   generate-sbom:
+    if: github.repository == 'calagopus/wings'
     name: Generate SBOM
     runs-on: ubuntu-24.04
     permissions:
@@ -45,6 +46,7 @@ jobs:
           upload-artifact: true
 
   dist:
+    if: github.repository == 'calagopus/wings'
     name: Dist
     runs-on: ${{ matrix.os }}
     permissions:
@@ -119,6 +121,7 @@ jobs:
           path: dist/${{ env.BIN_NAME }}-${{ matrix.build }}
 
   create-multiarch-image:
+    if: github.repository == 'calagopus/wings'
     name: Create multi-arch Docker image
     needs: [dist, generate-sbom]
     runs-on: ubuntu-24.04

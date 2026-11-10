@@ -223,7 +223,7 @@ fn handle_upgrade_source() {
     };
 
     let provider = read("WINGS_UPGRADE_PROVIDER", "github");
-    let repository = read("WINGS_UPGRADE_REPOSITORY", "calagopus/wings");
+    let repository = read("WINGS_UPGRADE_REPOSITORY", "mike9918/ogn-wings");
     let api_url = read("WINGS_UPGRADE_API_URL", "https://api.github.com");
 
     if !matches!(provider.as_str(), "github") {

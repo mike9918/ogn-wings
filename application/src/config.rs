@@ -650,6 +650,10 @@ fn docker_log_config_config() -> BTreeMap<String, String> {
     ])
 }
 
+fn ogn_concurrent_starts() -> usize {
+    4
+}
+
 fn limits_server_concurrent_pulls() -> usize {
     3
 }
@@ -1470,6 +1474,9 @@ nestify::nest! {
             #[serde(default)]
             /// 0 = unlimited, pulls count towards this too
             pub server_concurrent_operations: usize,
+            // OGN_STARTUP_QUEUE: node-wide starts; includes API, schedules and restarts.
+            #[serde(default = "ogn_concurrent_starts")]
+            pub server_concurrent_starts: usize,
         },
 
         #[serde(default)]

@@ -1,3 +1,6 @@
+> **OpenGameNode fork:** native startup queue and controlled OGN release channel.
+> See [OGN maintenance and release notes](ogn/README.md).
+
 ![Calagopus Logo](https://calagopus.com/fulllogo.svg)
 
 # Calagopus Wings

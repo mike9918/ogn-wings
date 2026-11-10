@@ -31,6 +31,7 @@ impl ServerState {
 }
 
 pub struct ServerStateLock {
+    startup_marker: Option<super::startup_marker::Marker>,
     state: tokio::sync::watch::Sender<ServerState>,
     locked: tokio::sync::Mutex<()>,
     pending_restart: AtomicBool,
@@ -44,6 +45,7 @@ impl ServerStateLock {
         schedule_manager: Arc<super::schedule::manager::ScheduleManager>,
     ) -> Self {
         Self {
+            startup_marker: None,
             state: tokio::sync::watch::Sender::new(ServerState::default()),
             locked: tokio::sync::Mutex::new(()),
             pending_restart: AtomicBool::new(false),
@@ -54,6 +56,12 @@ impl ServerStateLock {
 
     #[inline]
     pub async fn set_state(&self, state: ServerState) {
+        if matches!(state, ServerState::Running | ServerState::Offline)
+            && let Some(marker) = &self.startup_marker
+            && let Err(err) = marker.clear()
+        {
+            tracing::error!("failed to clear startup recovery marker: {err}");
+        }
         if self.get_state() == state {
             return;
         }
@@ -94,6 +102,32 @@ impl ServerStateLock {
                 .build(),
             )
             .ok();
+    }
+
+    pub fn with_startup_marker(mut self, marker: super::startup_marker::Marker) -> Self {
+        self.startup_marker = Some(marker);
+        self
+    }
+
+    /// Restore before exposing the server or attaching Docker status streams.
+    /// This is recovery, not a new power action or schedule trigger.
+    pub fn restore_starting(&self) {
+        if self.startup_marker.as_ref().is_some_and(|m| m.exists()) {
+            self.state.send_replace(ServerState::Starting);
+        }
+    }
+
+    pub fn restore_previous_starting(&self, previous: ServerState) {
+        if previous == ServerState::Starting && self.get_state() == ServerState::Offline {
+            self.state.send_replace(ServerState::Starting);
+        }
+    }
+
+    pub fn persist_starting(&self) -> std::io::Result<()> {
+        if let Some(marker) = &self.startup_marker {
+            marker.persist()?;
+        }
+        Ok(())
     }
 
     #[inline]

@@ -10,6 +10,7 @@ env:
 
 jobs:
   release-info:
+    if: github.repository == 'calagopus/wings'
     name: Determine release info
     runs-on: ubuntu-24.04
     permissions: {}
@@ -44,6 +45,7 @@ jobs:
           fi
 
   publish:
+    if: github.repository == 'calagopus/wings'
     name: Build and Publish
     needs: [release-info]
     uses: ./.github/workflows/build-and-publish.yml
@@ -59,6 +61,7 @@ jobs:
       tag_latest_pre: ${{ needs.release-info.outputs.is_prerelease == 'true' }}
 
   publish-draft-release:
+    if: github.repository == 'calagopus/wings'
     name: Publish Draft Release
     needs: [release-info, publish]
     runs-on: ubuntu-24.04

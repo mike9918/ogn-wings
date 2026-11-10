@@ -32,6 +32,11 @@ pub mod resources;
 pub mod schedule;
 pub mod script;
 pub mod state;
+// OGN_STARTUP_QUEUE
+pub mod startup_journal;
+pub mod startup_marker;
+pub mod startup_queue;
+pub mod startup_queue_core;
 pub mod transfer;
 pub mod tunnel;
 pub mod websocket;
@@ -273,6 +278,12 @@ impl Server {
         )));
 
         let suspended = configuration.suspended;
+        let startup_marker = startup_marker::Marker::new(
+            &app_state
+                .config
+                .resolve_as_path(|cfg| &cfg.system.root_directory),
+            configuration.uuid,
+        );
         let server = Self(Arc::new(InnerServer {
             uuid: configuration.uuid,
             app_state,
@@ -294,7 +305,8 @@ impl Server {
             diff,
             activity,
 
-            state: state::ServerStateLock::new(websocket_tx, schedules),
+            state: state::ServerStateLock::new(websocket_tx, schedules)
+                .with_startup_marker(startup_marker),
             outgoing_transfer: RwLock::new(None),
             incoming_transfer: RwLock::new(None),
             installer: RwLock::new(None),
@@ -318,6 +330,8 @@ impl Server {
                 filesystem::sqlite::QUERY_MAX_CONCURRENT,
             ),
         }));
+
+        server.state.restore_starting();
 
         server.spawn_stats_forwarder();
         server.spawn_trash_purge_task();
@@ -450,6 +464,22 @@ impl Server {
             }
         };
 
+        // Subscribe first, then replay this container's bounded log tail. A
+        // readiness line emitted while Wings was offline must not be lost.
+        let replay = if self.state.get_state() == state::ServerState::Starting {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let reader = process_handle.logs(Some(10_000)).await?;
+                let mut bytes = Vec::new();
+                reader.take(4 * 1024 * 1024).read_to_end(&mut bytes).await?;
+                anyhow::Ok(String::from_utf8_lossy(&bytes).into_owned())
+            })
+            .await
+            .ok()
+            .and_then(Result::ok)
+        } else {
+            None
+        };
+
         let old_task = self
             .process_startup_task
             .write()
@@ -501,6 +531,14 @@ impl Server {
 
                     false
                 };
+
+                if let Some(replay) = replay {
+                    for line in replay.lines() {
+                        if check_startup(line).await {
+                            return;
+                        }
+                    }
+                }
 
                 loop {
                     match stdout_lines.recv().await {
@@ -1138,6 +1176,7 @@ impl Server {
             }
             Err(err) => {
                 tracing::debug!(server = %self.uuid, "no running container to attach to: {}", err);
+                self.state.set_state(state::ServerState::Offline).await;
             }
         }
 
@@ -1289,9 +1328,37 @@ impl Server {
             "starting server"
         );
 
+        // Fail visibly on a policy lookup failure rather than silently losing a
+        // paid entitlement. A missing older extension explicitly falls back to FIFO.
+        let priority = self
+            .app_state
+            .config
+            .client
+            .startup_priority(self.uuid)
+            .await
+            .map_err(|err| self.report_power_error(crate::models::ServerPowerAction::Start, err))?;
+        let reservation = startup_queue::reserve_priority(
+            self.uuid,
+            self.app_state.config.load().limits.server_concurrent_starts,
+            priority,
+        )?;
+        self.start_reserved(reservation, aquire_timeout, skip_schedules)
+            .await
+    }
+
+    pub(crate) async fn start_reserved(
+        &self,
+        mut reservation: startup_queue::Reservation,
+        aquire_timeout: Option<std::time::Duration>,
+        skip_schedules: bool,
+    ) -> Result<(), anyhow::Error> {
         let server = self.clone();
         tokio::spawn(async move {
-            match server
+            reservation.acquire(&server).await?;
+            if server.locked_state().is_some() || server.state.get_state()!=state::ServerState::Offline {
+                return Err(anyhow::anyhow!("Server changed state while waiting for startup admission"));
+            }
+            let result=match server
                 .state
                 .execute_action(
                     state::ServerState::Starting,
@@ -1408,6 +1475,7 @@ impl Server {
                             None => return Ok(()),
                         };
 
+                        server.state.persist_starting()?;
                         process_handle.start().await?;
 
                         Ok(())
@@ -1428,12 +1496,41 @@ impl Server {
                         ))
                     },
                     Err(err) => Err(server.report_power_error(crate::models::ServerPowerAction::Start, err)),
+                };
+                if result.is_ok() {
+                    let mut states=server.state.subscribe();
+                    let deadline=tokio::time::sleep(std::time::Duration::from_secs(300));
+                    tokio::pin!(deadline);
+                    let mut timed_out=false;
+                    loop {
+                        let current=*states.borrow_and_update();
+                        match current {
+                            state::ServerState::Running => { reservation.finish(true);break; },
+                            state::ServerState::Offline => { reservation.finish(false);break; },
+                            _=>{},
+                        }
+                        if timed_out {
+                            if states.changed().await.is_err() {break;}
+                        } else {
+                            tokio::select! {
+                                changed=states.changed()=>{if changed.is_err() {break;}},
+                                _=&mut deadline=>{
+                                    timed_out=true;reservation.attention();
+                                    server.log_daemon_with_prelude("Startup exceeded five minutes; its startup slot remains reserved until Running or Stop.");
+                                },
+                            }
+                        }
+                    }
                 }
+                result
         })
         .await?
     }
 
     pub async fn kill(&self, skip_schedules: bool) -> Result<(), anyhow::Error> {
+        if startup_queue::try_cancel(self.uuid)? {
+            return Ok(());
+        }
         if self.state.get_state() == state::ServerState::Offline {
             return Ok(());
         }
@@ -1475,6 +1572,9 @@ impl Server {
         aquire_timeout: Option<std::time::Duration>,
         skip_schedules: bool,
     ) -> Result<(), anyhow::Error> {
+        if startup_queue::try_cancel(self.uuid)? {
+            return Ok(());
+        }
         if self.state.get_state() == state::ServerState::Offline {
             return Err(anyhow::anyhow!("Server is already stopped."));
         }
@@ -1676,6 +1776,13 @@ impl Server {
         action: crate::models::ServerPowerAction,
         aquire_timeout: Option<std::time::Duration>,
     ) -> Result<(), anyhow::Error> {
+        if matches!(
+            action,
+            crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
+        ) && startup_queue::try_cancel(self.uuid)?
+        {
+            return Ok(());
+        }
         use crate::models::ServerPowerAction;
 
         let auto_kill = self.configuration.read().await.auto_kill;
@@ -1703,6 +1810,13 @@ impl Server {
         &self,
         action: crate::models::ServerPowerAction,
     ) -> Result<(), PowerActionError> {
+        if matches!(
+            action,
+            crate::models::ServerPowerAction::Stop | crate::models::ServerPowerAction::Kill
+        ) && startup_queue::try_cancel(self.uuid).map_err(PowerActionError::Internal)?
+        {
+            return Ok(());
+        }
         use crate::models::ServerPowerAction;
 
         let state = self.state.get_state();
