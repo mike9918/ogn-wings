@@ -2,8 +2,8 @@
 
 Minimal native startup-admission fork of Calagopus Wings. Upstream licensing and
 attribution are retained. The upstream release and commit are recorded in
-`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.8+ogn.4`.
-The stable version requirement remains compatible with Panel 1.2.8, while update
+`ogn/upstream.json`; OGN releases add build metadata, currently `1.2.9+ogn.4`.
+The stable version requirement remains compatible with Panel 1.2.9 (and the Sessions extension range >=1.2.8, <1.3.0), while update
 checks and system information distinguish OGN revisions.
 
 ## Why a native queue
@@ -60,7 +60,7 @@ Do not override the update repository back to upstream on an OGN deployment.
 ## Keeping current
 
 Keep fork `main` available for upstream history. The initial OGN patch is reviewed
-against the released tag on `codex/release-1.2.8`, through `codex/ogn-queue`. Do not
+against the released tag on `codex/release-1.2.9 / upstream release-1.2.9`, through the 1.2.9 OGN queue branch. Do not
 force-reset the OGN release branch with GitHub's Sync Fork command.
 
 The upstream-compatibility workflow fetches the chosen upstream ref, attempts a
